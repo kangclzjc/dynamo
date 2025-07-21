@@ -1,0 +1,19 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dynamo-cloud-api-store
+  namespace: dynamo-cloud
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: dynamo-api-store.test
+    http:
+      paths:
+      - backend:
+          service:
+            name: dynamo-cloud-dynamo-api-store
+            port:
+              number: 80
+        path: /
+        pathType: Prefix
+

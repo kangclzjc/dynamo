@@ -1,0 +1,29 @@
+apiVersion: topology.volcano.sh/v1alpha1
+kind: HyperNode
+metadata:
+  name: s0
+spec:
+  tier: 1 # s0位于tier1
+  members:
+  - type: Node
+    selector:
+      exactMatch:
+        name: "l20-6"
+
+  - type: Node
+    selector:
+      exactMatch:
+        name: "l20-5"
+
+---
+apiVersion: topology.volcano.sh/v1alpha1
+kind: HyperNode
+metadata:
+  name: s1
+spec:
+  tier: 1 # s0位于tier1
+  members:
+  - type: Node
+    selector:
+      exactMatch:
+        name: "l20-3"

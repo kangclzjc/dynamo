@@ -33,15 +33,16 @@ VllmWorker:
   max-local-prefill-length: 10
   max-prefill-queue-size: 2
   ServiceArgs:
-    workers: 1
+    workers: 2
     resources:
-      gpu: '1'
+      gpu: '4'
+    total_gpus: 8  
   common-configs: [model, block-size, max-model-len, kv-transfer-config]
 
 PrefillWorker:
   max-num-batched-tokens: 16384
   ServiceArgs:
-    workers: 1
+    workers: 2
     resources:
       gpu: '1'
   common-configs: [model, block-size, max-model-len, kv-transfer-config]

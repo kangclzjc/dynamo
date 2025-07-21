@@ -37,7 +37,7 @@ export ISTIO_ENABLED="${ISTIO_ENABLED:=false}"
 export ISTIO_GATEWAY="${ISTIO_GATEWAY:=istio-system/istio-ingressgateway}"
 export INGRESS_CLASS="${INGRESS_CLASS:=nginx}"
 export VIRTUAL_SERVICE_SUPPORTS_HTTPS="${VIRTUAL_SERVICE_SUPPORTS_HTTPS:=false}"
-export ENABLE_LWS="${ENABLE_LWS:=false}"
+export ENABLE_LWS="${ENABLE_LWS:=true}"
 
 # Add command line options
 INTERACTIVE=false

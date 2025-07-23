@@ -42,9 +42,10 @@ VllmWorker:
 PrefillWorker:
   max-num-batched-tokens: 16384
   ServiceArgs:
-    workers: 2
+    workers: 1
     resources:
-      gpu: '1'
+      gpu: '4'
+    total_gpus: 8  
   common-configs: [model, block-size, max-model-len, kv-transfer-config]
 
 Planner:

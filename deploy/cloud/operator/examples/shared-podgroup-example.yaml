@@ -1,0 +1,43 @@
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoComponentDeployment
+metadata:
+  name: vllm-prefill-worker
+  namespace: default
+  annotations:
+    nvidia.com/deployment-type: "leader-worker"
+    nvidia.com/lws-size: "6"  # Prefill uses 6 workers
+    nvidia.com/shared-podgroup: "true"  # Enable shared pod group
+spec:
+  dynamoComponent: "vllm-prefill-worker:latest"
+  dynamoTag: "VllmPrefillWorker"
+  replicas: 2
+  resources:
+    limits:
+      gpu: "1"
+      cpu: "10"
+      memory: "20Gi"
+    requests:
+      cpu: "5"
+      memory: "10Gi"
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoComponentDeployment
+metadata:
+  name: vllm-decode-worker
+  namespace: default
+  annotations:
+    nvidia.com/deployment-type: "leader-worker"
+    nvidia.com/lws-size: "4"  # Decode uses 4 workers
+    nvidia.com/shared-podgroup: "true"  # Enable shared pod group
+spec:
+  dynamoComponent: "vllm-decode-worker:latest"
+  dynamoTag: "VllmDecodeWorker"
+  replicas: 2
+  resources:
+    limits:
+      gpu: "1"
+      cpu: "10"
+      memory: "20Gi"
+    requests:
+      cpu: "5"
+      memory: "10Gi" 

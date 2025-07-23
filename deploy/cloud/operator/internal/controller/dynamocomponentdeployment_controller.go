@@ -33,6 +33,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog/v2"
 
 	"emperror.dev/errors"
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
@@ -79,6 +80,7 @@ const (
 
 	KubeAnnotationDeploymentType = "nvidia.com/deployment-type"
 	KubeAnnotationLWSSize        = "nvidia.com/lws-size"
+	KubeAnnotationSharedPodGroup = "nvidia.com/shared-podgroup"
 	DeploymentTypeStandard       = "standard"
 	DeploymentTypeLeaderWorker   = "leader-worker"
 	ComponentTypePlanner         = "Planner"
@@ -266,15 +268,42 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 
 		anyModified := false
 
-		for i := range int(desiredReplicas) {
+		// Check if shared pod group is enabled for prefill/decode components
+		resourceAnnotations := getResourceAnnotations(dynamoComponentDeployment)
+		sharedPodGroupEnabled := resourceAnnotations[KubeAnnotationSharedPodGroup] == commonconsts.KubeLabelValueTrue
 
+		// For shared pod groups, only create PodGroup once (for the first replica)
+		// For non-shared pod groups, create PodGroup for each replica
+		if !sharedPodGroupEnabled || !IsPrefillOrDecodeComponent(dynamoComponentDeployment) {
+			// Create individual PodGroup for each replica
+			for i := range int(desiredReplicas) {
+				modified_, _, err := commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*volcanov1beta1.PodGroup, bool, error) {
+					return r.generateVolcanoPodGroup(ctx, generateResourceOption{
+						dynamoComponentDeployment:               dynamoComponentDeployment,
+						dynamoComponent:                         dynamoComponentCR,
+						isStealingTrafficDebugModeEnabled:       false,
+						containsStealingTrafficDebugModeEnabled: false,
+						instanceID:                              &i,
+					})
+				})
+
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+
+				if modified_ {
+					anyModified = true
+				}
+			}
+		} else {
+			// Create shared PodGroup only once (for the first replica)
 			modified_, _, err := commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*volcanov1beta1.PodGroup, bool, error) {
 				return r.generateVolcanoPodGroup(ctx, generateResourceOption{
 					dynamoComponentDeployment:               dynamoComponentDeployment,
 					dynamoComponent:                         dynamoComponentCR,
 					isStealingTrafficDebugModeEnabled:       false,
 					containsStealingTrafficDebugModeEnabled: false,
-					instanceID:                              &i,
+					instanceID:                              ptr.To(0), // Use 0 for shared PodGroup
 				})
 			})
 
@@ -285,7 +314,10 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 			if modified_ {
 				anyModified = true
 			}
+		}
 
+		// Create LeaderWorkerSets for all replicas
+		for i := range int(desiredReplicas) {
 			modified_, lwsObj, err := commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*leaderworkersetv1.LeaderWorkerSet, bool, error) {
 				return r.generateLeaderWorkerSet(ctx, generateResourceOption{
 					dynamoComponentDeployment:               dynamoComponentDeployment,
@@ -308,7 +340,23 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		}
 
 		// Clean up any excess LeaderWorkerSets (if replicas were decreased)
-		baseKubeName := r.getKubeName(dynamoComponentDeployment, dynamoComponentCR, false)
+		// Note: resourceAnnotations and sharedPodGroupEnabled are already declared above
+
+		var baseKubeName string
+		if sharedPodGroupEnabled && IsPrefillOrDecodeComponent(dynamoComponentDeployment) {
+			// For shared pod groups, we need to handle cleanup differently
+			componentName := strings.ToLower(dynamoComponentCR.Spec.DynamoComponent)
+			if strings.Contains(componentName, "prefill") {
+				baseKubeName = fmt.Sprintf("%s-prefill", GetSharedPodGroupName(dynamoComponentDeployment, dynamoComponentCR))
+			} else if strings.Contains(componentName, "decode") {
+				baseKubeName = fmt.Sprintf("%s-decode", GetSharedPodGroupName(dynamoComponentDeployment, dynamoComponentCR))
+			} else {
+				baseKubeName = GetSharedPodGroupName(dynamoComponentDeployment, dynamoComponentCR)
+			}
+		} else {
+			baseKubeName = r.getKubeName(dynamoComponentDeployment, dynamoComponentCR, false)
+		}
+
 		for i := int(desiredReplicas); ; i++ {
 			// Try to find a LeaderWorkerSet with the next index
 			nextLWSName := fmt.Sprintf("%s-%d", baseKubeName, i)
@@ -330,21 +378,24 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 				return ctrl.Result{}, err
 			}
 
-			podGroupName := nextLWSName
-			podGroupToDelete := &volcanov1beta1.PodGroup{}
-			err = r.Get(ctx, types.NamespacedName{
-				Name:      podGroupName,
-				Namespace: dynamoComponentDeployment.Namespace,
-			}, podGroupToDelete)
+			// For shared pod groups, we don't delete individual PodGroups as they are shared
+			if !sharedPodGroupEnabled || !IsPrefillOrDecodeComponent(dynamoComponentDeployment) {
+				podGroupName := nextLWSName
+				podGroupToDelete := &volcanov1beta1.PodGroup{}
+				err = r.Get(ctx, types.NamespacedName{
+					Name:      podGroupName,
+					Namespace: dynamoComponentDeployment.Namespace,
+				}, podGroupToDelete)
 
-			if err != nil {
-				if !k8serrors.IsNotFound(err) {
-					logs.Error(err, "Failed to get PodGroup for deletion", "podGroupName", podGroupName)
-				}
-			} else {
-				err = r.Delete(ctx, podGroupToDelete)
 				if err != nil {
-					logs.Error(err, "Failed to delete PodGroup", "podGroupName", podGroupName)
+					if !k8serrors.IsNotFound(err) {
+						logs.Error(err, "Failed to get PodGroup for deletion", "podGroupName", podGroupName)
+					}
+				} else {
+					err = r.Delete(ctx, podGroupToDelete)
+					if err != nil {
+						logs.Error(err, "Failed to delete PodGroup", "podGroupName", podGroupName)
+					}
 				}
 			}
 
@@ -476,6 +527,109 @@ func GetDeploymentType(dynamoComponentDeployment *v1alpha1.DynamoComponentDeploy
 	return deploymentType
 }
 
+// IsPrefillOrDecodeComponent checks if the component is a prefill or decode component
+func IsPrefillOrDecodeComponent(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) bool {
+	if dynamoComponentDeployment == nil {
+		return false
+	}
+
+	// Check if the deployment has the shared-podgroup annotation set to "true"
+	if dynamoComponentDeployment.Spec.Annotations != nil {
+		if sharedPodGroupValue, exists := dynamoComponentDeployment.Spec.Annotations[KubeAnnotationSharedPodGroup]; exists {
+			return sharedPodGroupValue == commonconsts.KubeLabelValueTrue
+		}
+	}
+
+	return false
+}
+
+// GetBaseComponentName extracts the base component name from prefill/decode components
+func GetBaseComponentName(dynamoComponent *v1alpha1.DynamoComponent) string {
+	if dynamoComponent == nil {
+		return ""
+	}
+
+	componentName := strings.ToLower(dynamoComponent.Spec.DynamoComponent)
+
+	// Remove "prefill" or "decode" from the component name
+	baseName := strings.ReplaceAll(componentName, "prefill", "")
+	baseName = strings.ReplaceAll(baseName, "decode", "")
+	baseName = strings.TrimSpace(baseName)
+
+	return baseName
+}
+
+// GetSharedPodGroupName returns the shared pod group name for prefill and decode components
+func GetSharedPodGroupName(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, dynamoComponent *v1alpha1.DynamoComponent) string {
+	// Use deployment name directly to avoid issues with invalid characters in component names
+	// This ensures the PodGroup name is always valid
+	return fmt.Sprintf("%s-shared", dynamoComponentDeployment.Name)
+}
+
+// calculateTotalLwsSizeForSharedPodGroup calculates the total lwsSize for all components sharing the same PodGroup
+func (r *DynamoComponentDeploymentReconciler) calculateTotalLwsSizeForSharedPodGroup(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, dynamoComponent *v1alpha1.DynamoComponent) (int64, error) {
+	logs := log.FromContext(ctx)
+
+	// List all DynamoComponentDeployments in the same namespace
+	var dynamoComponentDeployments v1alpha1.DynamoComponentDeploymentList
+	err := r.List(ctx, &dynamoComponentDeployments, client.InNamespace(dynamoComponentDeployment.Namespace))
+	if err != nil {
+		return 0, fmt.Errorf("failed to list DynamoComponentDeployments: %v", err)
+	}
+
+	var totalLwsSize int64 = 0
+
+	// Iterate through all deployments to find those that have shared pod group enabled
+	for _, deployment := range dynamoComponentDeployments.Items {
+		// Check if this deployment has shared pod group enabled
+		resourceAnnotations := getResourceAnnotations(&deployment)
+		sharedPodGroupEnabled := resourceAnnotations[KubeAnnotationSharedPodGroup] == commonconsts.KubeLabelValueTrue
+
+		if !sharedPodGroupEnabled {
+			continue
+		}
+
+		// Check if this component is a prefill or decode component (has shared-podgroup annotation)
+		if !IsPrefillOrDecodeComponent(&deployment) {
+			continue
+		}
+
+		// Get the lwsSize for this deployment
+		lwsSizeStr, ok := deployment.Spec.Annotations[KubeAnnotationLWSSize]
+		if !ok {
+			logs.Error(nil, "Missing lws-size annotation", "deploymentName", deployment.Name)
+			continue
+		}
+
+		lwsSize, err := strconv.ParseInt(lwsSizeStr, 10, 64)
+		if err != nil {
+			logs.Error(err, "Invalid lws-size value", "deploymentName", deployment.Name, "lwsSizeStr", lwsSizeStr)
+			continue
+		}
+
+		if lwsSize <= 0 {
+			logs.Error(nil, "LWS size must be greater than 0", "deploymentName", deployment.Name, "lwsSize", lwsSize)
+			continue
+		}
+
+		totalLwsSize += lwsSize
+		logs.Info("Added deployment to shared PodGroup calculation",
+			"deploymentName", deployment.Name,
+			"lwsSize", lwsSize,
+			"runningTotal", totalLwsSize)
+	}
+
+	if totalLwsSize == 0 {
+		return 0, fmt.Errorf("no valid deployments found with shared-podgroup enabled in namespace %s", dynamoComponentDeployment.Namespace)
+	}
+
+	logs.Info("Calculated total lwsSize for shared PodGroup",
+		"namespace", dynamoComponentDeployment.Namespace,
+		"totalLwsSize", totalLwsSize)
+
+	return totalLwsSize, nil
+}
+
 // IsLeaderWorkerSetReady determines if a LeaderWorkerSet is fully ready and available
 func IsLeaderWorkerSetReady(leaderWorkerSet *leaderworkersetv1.LeaderWorkerSet) bool {
 	if leaderWorkerSet == nil {
@@ -521,13 +675,41 @@ func (r *DynamoComponentDeploymentReconciler) generateVolcanoPodGroup(ctx contex
 		return nil, false, fmt.Errorf("generateVolcanoPodGroup: instanceID cannot be negative, got %d", instanceID)
 	}
 
-	podGroupName := r.getKubeName(opt.dynamoComponentDeployment, opt.dynamoComponent, opt.isStealingTrafficDebugModeEnabled)
-	podGroupName = fmt.Sprintf("%s-%d", podGroupName, instanceID)
+	// Check if shared pod group is enabled for prefill/decode components
+	resourceAnnotations := getResourceAnnotations(opt.dynamoComponentDeployment)
+	sharedPodGroupEnabled := resourceAnnotations[KubeAnnotationSharedPodGroup] == commonconsts.KubeLabelValueTrue
+
+	var podGroupName string
+	klog.Infof("sharedPodGroupEnabled: %v, isPrefillOrDecode: %v", sharedPodGroupEnabled, IsPrefillOrDecodeComponent(opt.dynamoComponentDeployment))
+	if sharedPodGroupEnabled && IsPrefillOrDecodeComponent(opt.dynamoComponentDeployment) {
+		// Use shared pod group name for prefill/decode components
+		podGroupName = GetSharedPodGroupName(opt.dynamoComponentDeployment, opt.dynamoComponent)
+		logs.Info("Using shared pod group for prefill/decode component", "podGroupName", podGroupName)
+	} else {
+		// Use individual pod group name
+		podGroupName = r.getKubeName(opt.dynamoComponentDeployment, opt.dynamoComponent, opt.isStealingTrafficDebugModeEnabled)
+		podGroupName = fmt.Sprintf("%s-%d", podGroupName, instanceID)
+	}
 
 	kubeNs := opt.dynamoComponentDeployment.Namespace
 
 	labels := make(map[string]string)
-	labels["instance-id"] = fmt.Sprintf("%d", instanceID)
+	if !sharedPodGroupEnabled || !IsPrefillOrDecodeComponent(opt.dynamoComponentDeployment) {
+		labels["instance-id"] = fmt.Sprintf("%d", instanceID)
+	}
+
+	// Add component type labels for shared pod groups
+	if sharedPodGroupEnabled && IsPrefillOrDecodeComponent(opt.dynamoComponentDeployment) {
+		componentName := strings.ToLower(opt.dynamoComponent.Spec.DynamoComponent)
+		if strings.Contains(componentName, "prefill") {
+			labels["component-type"] = "prefill"
+		} else if strings.Contains(componentName, "decode") {
+			labels["component-type"] = "decode"
+		}
+		labels["shared-podgroup"] = "true"
+		// Use deployment name instead of component name to avoid invalid characters
+		labels["base-component"] = opt.dynamoComponentDeployment.Name
+	}
 
 	lwsSizeStr, ok := opt.dynamoComponentDeployment.Spec.Annotations[KubeAnnotationLWSSize]
 	if !ok {
@@ -543,7 +725,21 @@ func (r *DynamoComponentDeploymentReconciler) generateVolcanoPodGroup(ctx contex
 	if lwsSize == 1 {
 		return nil, false, errors.New("generateVolcanoPodGroup: LWS size of 1 means that the LWS is not needed, change 'nvidia.com/deployment-type' to 'standard'/disable whatever flag you used to enable LWS")
 	}
-	minMember := int32(lwsSize)
+
+	// For shared pod groups, we need to calculate the total size for both prefill and decode
+	var minMember int32
+	if sharedPodGroupEnabled && IsPrefillOrDecodeComponent(opt.dynamoComponentDeployment) {
+		// Calculate the total lwsSize for all components sharing this PodGroup
+		totalLwsSize, err := r.calculateTotalLwsSizeForSharedPodGroup(ctx, opt.dynamoComponentDeployment, opt.dynamoComponent)
+		if err != nil {
+			return nil, false, fmt.Errorf("generateVolcanoPodGroup: failed to calculate total lwsSize: %v", err)
+		}
+		minMember = int32(totalLwsSize)
+		logs.Info("Using shared pod group with calculated total size", "minMember", minMember, "totalLwsSize", totalLwsSize)
+	} else {
+		minMember = int32(lwsSize)
+		logs.Info("Using individual pod group", "minMember", minMember)
+	}
 
 	podGroup := &volcanov1beta1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{
@@ -664,8 +860,26 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 		return nil, false, fmt.Errorf("generateLeaderWorkerSet: instanceID cannot be negative, got %d", instanceID)
 	}
 
-	kubeName := r.getKubeName(opt.dynamoComponentDeployment, opt.dynamoComponent, opt.isStealingTrafficDebugModeEnabled)
-	kubeName = fmt.Sprintf("%s-%d", kubeName, instanceID)
+	// Check if shared pod group is enabled for prefill/decode components
+	resourceAnnotations := getResourceAnnotations(opt.dynamoComponentDeployment)
+	sharedPodGroupEnabled := resourceAnnotations[KubeAnnotationSharedPodGroup] == commonconsts.KubeLabelValueTrue
+
+	var kubeName string
+	if sharedPodGroupEnabled && IsPrefillOrDecodeComponent(opt.dynamoComponentDeployment) {
+		// For shared pod groups, we need to ensure unique names for each component
+		componentName := strings.ToLower(opt.dynamoComponent.Spec.DynamoComponent)
+		if strings.Contains(componentName, "prefill") {
+			kubeName = fmt.Sprintf("%s-prefill-%d", GetSharedPodGroupName(opt.dynamoComponentDeployment, opt.dynamoComponent), instanceID)
+		} else if strings.Contains(componentName, "decode") {
+			kubeName = fmt.Sprintf("%s-decode-%d", GetSharedPodGroupName(opt.dynamoComponentDeployment, opt.dynamoComponent), instanceID)
+		} else {
+			kubeName = fmt.Sprintf("%s-%d", GetSharedPodGroupName(opt.dynamoComponentDeployment, opt.dynamoComponent), instanceID)
+		}
+		logs.Info("Using shared pod group name for LeaderWorkerSet", "kubeName", kubeName)
+	} else {
+		kubeName = r.getKubeName(opt.dynamoComponentDeployment, opt.dynamoComponent, opt.isStealingTrafficDebugModeEnabled)
+		kubeName = fmt.Sprintf("%s-%d", kubeName, instanceID)
+	}
 
 	kubeNs := opt.dynamoComponentDeployment.Namespace
 	labels := r.getKubeLabels(opt.dynamoComponentDeployment, opt.dynamoComponent)
@@ -673,7 +887,24 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	if labels == nil {
 		labels = make(map[string]string)
 	}
-	labels["instance-id"] = fmt.Sprintf("%d", instanceID)
+
+	// Add instance ID label only for non-shared pod groups
+	if !sharedPodGroupEnabled || !IsPrefillOrDecodeComponent(opt.dynamoComponentDeployment) {
+		labels["instance-id"] = fmt.Sprintf("%d", instanceID)
+	}
+
+	// Add component type labels for shared pod groups
+	if sharedPodGroupEnabled && IsPrefillOrDecodeComponent(opt.dynamoComponentDeployment) {
+		componentName := strings.ToLower(opt.dynamoComponent.Spec.DynamoComponent)
+		if strings.Contains(componentName, "prefill") {
+			labels["component-type"] = "prefill"
+		} else if strings.Contains(componentName, "decode") {
+			labels["component-type"] = "decode"
+		}
+		labels["shared-podgroup"] = "true"
+		// Use deployment name instead of component name to avoid invalid characters
+		labels["base-component"] = opt.dynamoComponentDeployment.Name
+	}
 
 	leaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -683,11 +914,19 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 		},
 	}
 
+	// For shared pod groups, we need to use the shared pod group name for scheduling
+	var podGroupName string
+	if sharedPodGroupEnabled && IsPrefillOrDecodeComponent(opt.dynamoComponentDeployment) {
+		podGroupName = GetSharedPodGroupName(opt.dynamoComponentDeployment, opt.dynamoComponent)
+	} else {
+		podGroupName = kubeName
+	}
+
 	leaderPodLabels := make(map[string]string)
 	for k, v := range labels {
 		leaderPodLabels[k] = v
 	}
-	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(ctx, opt, kubeName, leaderPodLabels, instanceID)
+	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(ctx, opt, podGroupName, leaderPodLabels, instanceID)
 	if err != nil {
 		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: failed to generate leader pod template")
 	}
@@ -696,7 +935,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	for k, v := range labels {
 		workerPodLabels[k] = v
 	}
-	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(ctx, opt, kubeName, workerPodLabels, instanceID)
+	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(ctx, opt, podGroupName, workerPodLabels, instanceID)
 	if err != nil {
 		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: failed to generate worker pod template")
 	}

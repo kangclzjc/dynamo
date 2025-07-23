@@ -39,6 +39,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/archive"
@@ -277,6 +278,9 @@ func SetLwsAnnotations(serviceArgs *ServiceArgs, deployment *v1alpha1.DynamoComp
 			}
 			deployment.Spec.Annotations["nvidia.com/lws-size"] = strconv.Itoa(lwsSize)
 			deployment.Spec.Annotations["nvidia.com/deployment-type"] = "leader-worker"
+			deployment.Spec.Annotations["nvidia.com/shared-podgroup"] = "true"
+			deployment.Spec.Annotations["nvidia.com/shared-podgroup-name"] = deployment.Spec.ServiceName
+			klog.Infof("set lws annotations for deployment kang ----------------- %s", deployment.Name)
 		}
 	}
 	return nil

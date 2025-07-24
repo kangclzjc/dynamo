@@ -571,8 +571,22 @@ func GetBaseComponentName(dynamoComponent *v1alpha1.DynamoComponent) string {
 
 // GetSharedPodGroupName returns the shared pod group name for prefill and decode components
 func GetSharedPodGroupName(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, dynamoComponent *v1alpha1.DynamoComponent) string {
-	// Use a fixed shared pod group name for all deployments with shared-podgroup enabled
-	// This ensures all deployments share the same PodGroup
+	// For shared pod groups, always use a fixed name to ensure all components share the same PodGroup
+	// This ensures that prefill and decode components (and any other components with shared-podgroup enabled)
+	// all use the same PodGroup name, regardless of their individual annotations
+
+	// Check if there's a configured shared pod group name in the config (from disagg.yaml)
+	// We'll look for a common configuration that applies to all components
+	if dynamoComponentDeployment.Spec.Annotations != nil {
+		if podGroupName, ok := dynamoComponentDeployment.Spec.Annotations["nvidia.com/shared-podgroup-name"]; ok && podGroupName != "" {
+			// For now, we'll use a fixed name to ensure all components share the same PodGroup
+			// In the future, this could be enhanced to read from a ConfigMap or other shared config
+			return "prefill-decode-shared-podgroup"
+		}
+	}
+
+	// Fallback to default name if no configuration is found
+	// Use a fixed name that all shared components will use
 	return "prefill-decode-shared-podgroup"
 }
 

@@ -33,7 +33,7 @@ VllmWorker:
   max-local-prefill-length: 10
   max-prefill-queue-size: 2
   ServiceArgs:
-    workers: 2
+    workers: 1
     resources:
       gpu: '4'
     total_gpus: 8  

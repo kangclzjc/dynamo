@@ -11,7 +11,7 @@ SPDX-License-Identifier: Apache-2.0
 | **Status**      | Draft                                                            |
 | **Authors**     | Kang Zhang (@kangclzjc), Anish Maddipoti (amaddipoti@nvidia.com) |
 | **Created**     | 2026-06-05                                                       |
-| **Detailed design** | Appendix A (non-normative); reference UI/UX in Appendix A.6 |
+| **Reference UI/UX**  | Appendix A (non-normative) |
 
 ## Summary
 
@@ -25,11 +25,11 @@ This DEP proposes **Governor** — the Dynamo control-plane API: a thin, statele
 existing CRDs with a versioned, OpenAPI-described contract, plus a **high-level `deploy`
 endpoint** that translates a simplified, UI-friendly configuration into a fully-formed DGD or
 DGDR custom resource. A reference **"Deploy a model" UI** in the NVIDIA visual style
-(Appendix A.6) demonstrates the API and the intent → CR mapping end-to-end.
+(Appendix A) demonstrates the API and the intent → CR mapping end-to-end.
 
-This document is a proposal: the normative content is §Proposal / §Requirements. Appendix A
-captures implementation-level detail (endpoint shapes, schemas, error model, UI) for reviewers
-who want it, and is expected to be refined in a follow-up design doc / the implementation PR.
+This document is a proposal: the normative content is §Proposal / §Requirements. Appendix A holds the reference UI/UX (the deploy form and the field→CR mapping); other
+implementation detail (endpoint shapes, schemas, error model) is deferred to a follow-up
+design doc / the implementation PR.
 
 ## Motivation
 
@@ -125,7 +125,7 @@ operator's reconcile loop is unchanged and remains the source of truth.
 
 The API fronts the existing CRDs with namespace-scoped REST resources
 (`/api/v1/namespaces/{ns}/…`), targeting each CRD's **served** version (the conversion webhook
-bridges to the storage version; see Appendix A.4):
+bridges to the storage version):
 
 | Resource             | CRD (kind)                              | Served apiVersion         | Verbs        |
 | -------------------- | --------------------------------------- | ------------------------- | ------------ |
@@ -141,8 +141,8 @@ UI-friendly configuration and emits a complete **DGD** (direct) or **DGDR** (SLA
 supports a two-level dry-run — **render-only** (translate and return the manifest, no cluster
 contact) and **server-side** (a Kubernetes `dryRun=All` for real admission/CEL validation).
 Status, events, a streaming watch (SSE), a `scale` action, and YAML export are exposed as
-subresources. The route list, request schema, dry-run mechanics, and error model are in
-Appendix A.1–A.3.
+subresources. The full route list, request schema, dry-run mechanics, and error model will be specified in
+the served OpenAPI document and a follow-up design doc.
 
 ### Authentication & authorization
 
@@ -152,8 +152,8 @@ service holds no identity store and **issues no kubeconfigs**. Authorization is 
 end user, so RBAC and the Kubernetes audit log stay authoritative — with token-forwarding as an
 in-cluster opt-in. Tenants map to namespace(s) via OIDC claims and `RoleBinding`s; quota is
 delegated to Kubernetes `ResourceQuota`. Secrets (HuggingFace token, image-pull) are referenced
-**by name** and never carried in request bodies. The impersonation vs token-forwarding
-trade-off and multi-tenancy detail are in Appendix A.5.
+**by name** and never carried in request bodies. The full impersonation vs token-forwarding
+trade-off and multi-tenancy detail are deferred to the follow-up design doc.
 
 ### Deployment topology — alternatives & recommendation
 
@@ -183,12 +183,12 @@ A reference single-page **"Deploy a model"** UI in the NVIDIA visual style demon
 and the intent → CR mapping end-to-end: a mode toggle (DGDR vs DGD), engine / hardware /
 parallelism / scaling / SLA / disaggregation / advanced sections, and a live YAML preview. The
 design tokens, page wireframe, field-visibility-by-mode, and the full **form-field → CR mapping
-table** are in Appendix A.6. (Proposed design; not implemented in this DEP.)
+table** are in Appendix A. (Proposed design; not implemented in this DEP.)
 
 ![Reference "Deploy a model" form (illustrative prototype)](images/governor-deploy-form.png)
 
 *Illustrative prototype of the "Deploy a model" form. The proposed design tracks the canonical
-CRD schema (see Appendix A.6): a `GPUSKUType`-driven GPU dropdown, the NVIDIA accent, and the
+CRD schema (see Appendix A): a `GPUSKUType`-driven GPU dropdown, the NVIDIA accent, and the
 v1beta1 `components` mapping.*
 
 ## Alternate Solutions
@@ -259,14 +259,14 @@ Using RFC 2119 keywords:
    right trade-off?
 5. **Impersonation privilege.** A gateway SA with broad `impersonate` is a high-value target;
    reviewers will want `resourceName` scoping, NetworkPolicy, and audit review.
-6. **Scale semantics (resolved in A.1).** When no DGDSA exists and a planner owns the component,
+6. **Scale semantics (resolved in Requirement 11).** When no DGDSA exists and a planner owns the component,
    the API refuses (`409`) rather than racing; open follow-up is how to detect "a planner owns
    this component" reliably.
 7. **Lossy coverage.** The form covers frontend/worker/prefill/decode but not `epp`, raw planner
    config (`spec.features.planner`), `topologyConstraint`, `compilationCache`, or GMS/failover.
    Is a lossy subset acceptable, with an escape hatch to raw CRUD for advanced cases?
 8. **SSE fan-out / resume (Phase 2).** Per-object watches don't scale; the Phase-2 design uses a
-   shared informer/relay with `resourceVersion` resume (A.1) — to be validated under load.
+   shared informer/relay with `resourceVersion` resume — to be validated under load.
 9. **`DynamoModel` confusion.** DM is a registry/LoRA resource, not a deploy target. The UI must
    not conflate "register a model" with "deploy a model."
 10. **Ownership.** Where does the reference service live (operator module vs separate module),
@@ -288,203 +288,11 @@ Using RFC 2119 keywords:
 
 ---
 
-## Appendix A — Detailed design (non-normative)
+## Appendix A — Reference UI/UX (non-normative)
 
-> This appendix is **non-normative**. It records implementation-level detail for reviewers who
-> want it; the normative proposal is above. Endpoint shapes, schemas, and mechanics here are
-> expected to be refined in a follow-up design doc / the implementation PR.
-
-### A.1 Routes, subresources & conventions
-
-Routes (deployments shown; the other resources from §"What the API exposes" follow the same shape):
-
-```
-GET    /api/v1/namespaces/{ns}/deployments
-POST   /api/v1/namespaces/{ns}/deployments
-GET    /api/v1/namespaces/{ns}/deployments/{name}
-PUT    /api/v1/namespaces/{ns}/deployments/{name}
-PATCH  /api/v1/namespaces/{ns}/deployments/{name}
-DELETE /api/v1/namespaces/{ns}/deployments/{name}
-```
-
-Cross-cutting subresources:
-
-| Subresource    | Route                                                       | Backing |
-| -------------- | ----------------------------------------------------------- | ------- |
-| Status         | `GET …/{name}/status`                                       | typed projection of `status.{state\|phase, profilingPhase, conditions, components{}, dgdName, deploymentInfo}` |
-| Events         | `GET …/{name}/events`                                       | `corev1.Event` filtered by `involvedObject`, newest first |
-| Watch (SSE)    | `GET …/{name}/watch` (`Accept: text/event-stream`)          | a gateway **shared informer/relay** (one upstream watch per resource-type×namespace) fans out status transitions as SSE; resumable via `Last-Event-ID` ↔ `resourceVersion` + periodic `Bookmark`s. **Phase 2** |
-| Scale          | `POST …/deployments/{name}/scale` body `{component, replicas}` | If the component has a scaling adapter (`scalingAdapter: {}`), patch the **DGDSA** `/scale` subresource (`spec.replicas`). If it has none and no planner/autoscaler owns its replicas, patch `dgd.spec.components[?(@.name==component)].replicas`. If a planner owns the replicas but no adapter exists, **refuse `409`** and tell the caller to enable a scaling adapter — a direct patch would be reverted |
-| Manifest       | `GET …/{name}/manifest?format=yaml\|json`                   | the live object, for GitOps / "view source" |
-
-Conventions:
-
-- **Pagination** via `?limit=&continue=` passthrough to the Kubernetes list `continue` token;
-  responses echo `metadata.continue`.
-- **Selectors** via `?labelSelector=` and `?fieldSelector=` passthrough.
-- **Server-Side Apply** with a **per-caller field manager** (`dynamo-governor/{impersonated-user}`)
-  so managed-field ownership and conflict detection stay correct per tenant instead of collapsing
-  onto one shared identity; the API co-owns fields safely with the planner, HPA/KEDA, and GitOps
-  controllers, and `?force=true` is an explicit opt-in.
-- **Scaling has a single write path**: the `scale` action above is the only writer; the
-  `DynamoGraphDeploymentScalingAdapter` resource is read-only via REST (creating DGDSAs to wire
-  external autoscalers like HPA/KEDA is an advanced case served by raw CRUD on the underlying CRD).
-
-### A.2 The high-level deploy endpoint
-
-```
-POST /api/v1/namespaces/{ns}/deploy?dryRun={client|server}&fieldManager=dynamo-governor
-Content-Type: application/json
-```
-
-`DeploymentConfig` (summarized; full schema in the served OpenAPI document):
-
-| Group          | Fields                                                                                  |
-| -------------- | --------------------------------------------------------------------------------------- |
-| Mode           | `mode` = `dgd` \| `dgdr`                                                                 |
-| Identity       | `name`, `model`                                                                          |
-| Engine         | `backend` (`vllm`/`sglang`/`trtllm`; `auto` for DGDR), `backendImage`, `image`           |
-| Hardware       | `gpuType` (GPU SKU enum), `gpusPerReplica`, `gpusPerNode`, `totalGpus`                   |
-| Parallelism    | `tensorParallel`, `pipelineParallel`                                                     |
-| Scaling        | `replicas`, `replicasMin`, `replicasMax`, `frontendReplicas`                             |
-| SLA + workload | `targetTtftMs`, `targetItlMs`, `targetE2eMs`, `inputSeqLen`, `outputSeqLen`, `searchStrategy`, `autoApply` |
-| Disaggregation | `disaggEnabled`, `prefillReplicas`, `decodeReplicas`                                     |
-| Advanced       | `maxBatchSize`, `maxSeqLen`, `dtype`, `routerMode`, `extraArgs`, `envVars`               |
-
-`dryRun` has two levels. **`dryRun=client`** (render-only): the gateway performs the form → CR
-translation locally and returns the rendered manifest (JSON **and** YAML) **without contacting
-the cluster** — so it works with no cluster at all (local dev, CI). **`dryRun=server`**: the
-gateway additionally issues a Kubernetes `dryRun=All` apply, which runs the submitted version's
-(`v1beta1`) structural + CEL validation and the operator's admission webhooks **without
-persisting**. Server-side dry-run depends on those webhooks being dry-run-safe
-(`sideEffects: None` / `NoneOnDryRun`) — satisfied by the operator today (all its webhook
-configurations declare `sideEffects: None`), and conversion webhooks are invoked side-effect-free
-on dry-run. With `dryRun` omitted the endpoint creates the object via Server-Side Apply and
-returns its identity + initial status.
-
-**Example** — `POST /api/v1/namespaces/team-a/deploy?dryRun=server`:
-
-```json
-{
-  "mode": "dgdr",
-  "name": "llama3-70b-prod",
-  "model": "meta-llama/Llama-3.1-70B-Instruct",
-  "backend": "vllm",
-  "hardware": { "gpuType": "h200_sxm", "gpusPerNode": 8, "totalGpus": 8 },
-  "workload": { "inputSeqLen": 4000, "outputSeqLen": 1000 },
-  "sla": { "targetTtftMs": 300, "targetItlMs": 20 },
-  "disaggEnabled": true,
-  "searchStrategy": "rapid",
-  "autoApply": true
-}
-```
-
-Response `200` (rendered, not applied):
-
-```json
-{
-  "kind": "DynamoGraphDeploymentRequest",
-  "apiVersion": "nvidia.com/v1beta1",
-  "dryRun": "server",
-  "serverSideValidation": "passed",
-  "manifest": {
-    "apiVersion": "nvidia.com/v1beta1",
-    "kind": "DynamoGraphDeploymentRequest",
-    "metadata": { "name": "llama3-70b-prod", "namespace": "team-a" },
-    "spec": {
-      "model": "meta-llama/Llama-3.1-70B-Instruct",
-      "backend": "vllm",
-      "searchStrategy": "rapid",
-      "autoApply": true,
-      "hardware": { "gpuSku": "h200_sxm", "numGpusPerNode": 8, "totalGpus": 8 },
-      "workload": { "isl": 4000, "osl": 1000 },
-      "sla": { "ttft": 300, "itl": 20 }
-    }
-  },
-  "yaml": "apiVersion: nvidia.com/v1beta1\nkind: DynamoGraphDeploymentRequest\n..."
-}
-```
-
-The translation rules — which `components` to emit, how TP/PP/dtype/max-batch become worker
-`args`, how disaggregation splits the graph into `type: prefill` + `type: decode`, and how the
-form maps to the DGDR `hardware`/`workload`/`sla` blocks — are implemented **once** in the
-server and covered by unit tests. The full mapping is in A.6.
-
-### A.3 Error model
-
-Errors use an RFC 7807-style envelope with per-field detail:
-
-```json
-{
-  "type": "https://docs.nvidia.com/dynamo/errors/validation",
-  "title": "Invalid deployment configuration",
-  "status": 400,
-  "detail": "1 field failed validation",
-  "instance": "/api/v1/namespaces/team-a/deploy",
-  "fieldErrors": [
-    {
-      "field": "hardware.gpuType",
-      "code": "enum",
-      "message": "must be one of the supported GPU SKUs",
-      "got": "a10g",
-      "allowed": ["gb200_sxm","b200_sxm","h200_sxm","h100_sxm","h100_pcie","a100_sxm","a100_pcie","a30","l40s","l40","l4","v100_sxm","v100_pcie","t4","mi200","mi300"]
-    }
-  ]
-}
-```
-
-**Status is derived from the `metav1.Status` the apiserver returns**, not guessed by category:
-the gateway propagates `Status.Code` and maps `Status.Reason` — `Invalid` → `400`/`422`,
-`Forbidden` → `403`, `NotFound` → `404`, `AlreadyExists` → `409`, `Conflict` (SSA / optimistic
-lock) → `409` (same code as `AlreadyExists` but a distinct reason the client can disambiguate),
-`Timeout`/`ServerTimeout` → `504`/`503` — and expands `Status.Details.Causes` into `fieldErrors`.
-**Webhook rejections** are mapped by the `Status` they actually return (commonly `Forbidden` or
-`Invalid`), **not** assumed to be `422`. The gateway's **own pre-flight validation** (before any
-apiserver call, mirroring the CRD enums) returns `400` with the same `fieldErrors` shape (the
-`gpuType` example above).
-
-### A.4 API versioning
-
-The REST surface is versioned at the **path** (`/api/v1`), decoupled from CRD versions. The
-server pins the served CRD apiVersion it reads/writes per resource (DGD/DGDR/DCD → `v1beta1`,
-DM → `v1alpha1`) and echoes it in every response's `apiVersion`. When the operator later flips
-a storage version (e.g. DGD storage from `v1alpha1` to `v1beta1`), the conversion webhook
-absorbs it and the `/api/v1` contract is unchanged. A future `/api/v2` is reserved for breaking
-REST changes.
-
-### A.5 Authorization detail
-
-Two modeled options for mapping callers onto Kubernetes RBAC:
-
-| | **User impersonation** (recommended) | **Token forwarding** |
-| --- | --- | --- |
-| Mechanism | Service SA holds `impersonate`; sets `Impersonate-User`/`Impersonate-Group` per request | Service uses the caller's bearer token as the client credential |
-| RBAC authority | K8s RBAC, evaluated as the end user | K8s RBAC, evaluated as the token subject |
-| Audit | K8s audit shows the real user **and** the impersonating SA | Token subject only |
-| External OIDC | Yes — map OIDC claims → impersonated user/groups | Only if the apiserver directly trusts that token |
-| Risk | The `impersonate` verb is powerful → scope tightly (`resourceNames`) and harden the gateway | Tokens transit the gateway → wider exfiltration surface; can't bridge external OIDC to K8s identities |
-
-**Default: impersonation** — it lets external OIDC users act through Kubernetes RBAC without
-owning K8s credentials. Token forwarding is offered as opt-in for in-cluster SA callers (CI).
-
-- **Pre-flight authorization**: before any write, the server SHOULD issue a
-  `SubjectAccessReview` (as the impersonated user) and return a clean `403` listing the missing
-  verb/resource rather than leaking the raw apiserver error.
-- **Multi-tenancy**: tenant → namespace(s) mapping via an OIDC claim (e.g. `groups`) and
-  Kubernetes `RoleBinding`s. The `{ns}` path segment is always authorized against the
-  impersonated identity. Per-tenant quota is delegated to Kubernetes `ResourceQuota` /
-  `LimitRange`; the gateway does not re-implement quota.
-- **Secret handling**: the deploy config NEVER carries secret values. The HuggingFace token is
-  referenced by **Secret name** and wired as `envFrom.secretRef` on worker containers (matching
-  [`global-planner-vllm-test.yaml`](../../examples/global_planner/v1beta1/global-planner-vllm-test.yaml));
-  `imagePullSecrets` are referenced by name. An optional write-only
-  `POST …/secrets/hf-token` may create/update the opaque Secret under RBAC (value never read
-  back).
-- **Why not distribute kubeconfigs**: they embed long-lived credentials, cannot be scoped
-  per-request, bypass the gateway's audit/validation/translation, and make rotation/revocation
-  a per-client operation. Impersonation keeps a single trust boundary and audit trail.
-
-### A.6 Reference UI/UX
+> This appendix is **non-normative**: a reference design for the "Deploy a model" UI and the
+> form-field → CR mapping that the high-level `deploy` endpoint produces. The normative
+> proposal is above.
 
 A reference single-page "Deploy a model" app demonstrates the API in the **NVIDIA visual
 style**. (Proposed design; not implemented in this DEP.)

@@ -185,6 +185,12 @@ parallelism / scaling / SLA / disaggregation / advanced sections, and a live YAM
 design tokens, page wireframe, field-visibility-by-mode, and the full **form-field → CR mapping
 table** are in Appendix A.6. (Proposed design; not implemented in this DEP.)
 
+![Reference "Deploy a model" form (illustrative prototype)](images/governor-deploy-form.png)
+
+*Illustrative prototype of the "Deploy a model" form. The proposed design tracks the canonical
+CRD schema (see Appendix A.6): a `GPUSKUType`-driven GPU dropdown, the NVIDIA accent, and the
+v1beta1 `components` mapping.*
+
 ## Alternate Solutions
 
 - **Status quo (client-go / kubectl / Helm).** Works for Go and ops users; fails the non-Go,

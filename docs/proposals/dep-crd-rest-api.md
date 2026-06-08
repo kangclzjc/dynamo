@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# DEP: Native REST APIs for Dynamo CRD Lifecycle Management
+# DEP: Native REST APIs for Dynamo CRD Lifecycle Management (Dynadmin)
 
 | Field           | Value                                                            |
 | --------------- | ---------------------------------------------------------------- |
@@ -21,15 +21,16 @@ Dynamo's Kubernetes operator exposes its deployment surface — `DynamoGraphDepl
 client-go, Helm). There is no language-agnostic, OpenAPI-documented, auth-friendly HTTP
 surface for *creating, reading, updating, deleting, and observing* these resources.
 
-This DEP proposes **Dynadmin** — the Dynamo control-plane API: a thin, stateless HTTP service that fronts the
-existing CRDs with a versioned, OpenAPI-described contract, plus a **high-level `deploy`
-endpoint** that translates a simplified, UI-friendly configuration into a fully-formed DGD or
-DGDR custom resource. A reference **"Deploy a model" UI** in the NVIDIA visual style
+This DEP proposes **Dynadmin** — the Dynamo control-plane API: a thin, stateless HTTP service
+that fronts the existing CRDs with a versioned, OpenAPI-described contract, plus a **high-level
+`deploy` endpoint** that translates a simplified, UI-friendly configuration into a fully-formed
+DGD or DGDR custom resource. A reference **"Deploy a model" UI** in the NVIDIA visual style
 (Appendix A) demonstrates the API and the intent → CR mapping end-to-end.
 
-This document is a proposal: the normative content is §Proposal / §Requirements. Appendix A holds the reference UI/UX (the deploy form and the field→CR mapping); other
-implementation detail (endpoint shapes, schemas, error model) is deferred to a follow-up
-design doc / the implementation PR.
+This is a proposal in the spirit of a Kubernetes KEP: it covers the motivation, user stories,
+scope, and design. Detailed implementation (full endpoint schemas, error model, the served
+OpenAPI document) is left to a follow-up design doc / the implementation PR. Appendix A is a
+non-normative reference design for the UI and the field → CR mapping.
 
 ## Motivation
 
@@ -68,22 +69,12 @@ the CRD does not accept.
 This is exactly the cost a native API removes: the translation belongs in **one**
 authoritative place that tracks the CRD, not copied into every consumer.
 
-### Who is affected
-
-- **Platform / portal builders** wanting a web "Deploy a model" experience.
-- **Multi-tenant / SaaS** operators needing token-scoped, namespace-scoped access without
-  distributing cluster credentials.
-- **Non-Go automation** (TypeScript / Python / Java) and **thin CLIs**.
-- **The Dynamo project itself**, which has no canonical, testable home for the intent → CR
-  mapping.
-
 ### Goals
 
 - A **versioned REST contract** (`/api/v1/…`) for the full lifecycle of Dynamo CRDs.
 - A **canonical, server-side high-level `deploy` translation** so consumers stop
   re-implementing it.
-- **First-class status/observability** (conditions, phase, replica counts, events) and
-  **streaming** updates.
+- **First-class status/observability** (conditions, phase, replica counts, events).
 - A **machine-readable OpenAPI 3.x spec** served by the API.
 - **AuthN/AuthZ that maps cleanly onto Kubernetes RBAC** with namespace/tenant scoping,
   without distributing kubeconfigs.
@@ -99,6 +90,48 @@ authoritative place that tracks the CRD, not copied into every consumer.
 - Building a billing/usage/identity product — that is what downstream platforms layer on top.
 
 ## Proposal
+
+Introduce **Dynadmin**, a stateless control-plane REST service that fronts the Dynamo CRDs with
+ordinary CRUD plus a high-level `deploy` endpoint that owns the intent → CR translation. Clients
+(web UIs, CLIs, CI, SaaS platforms) speak HTTPS/JSON and authenticate with a bearer token;
+Dynadmin authorizes every call through Kubernetes RBAC and applies changes to the cluster, while
+the operator continues to reconcile exactly as it does today.
+
+### User Stories
+
+- **Story 1 — Self-service "Deploy a model" portal.** A platform team runs an internal portal.
+  A user fills the deploy form (model, engine, hardware, SLA targets…) and the portal POSTs it
+  to Dynadmin's `deploy` endpoint, which returns the rendered DGD/DGDR and creates it — no
+  client-go, no hand-written CR templating. (See the reference UI in Appendix A.)
+- **Story 2 — Multi-tenant inference service.** A SaaS gives each tenant a namespace. Tenants
+  create, list, update, and delete *their own* deployments through Dynadmin under their own
+  OIDC identity; Kubernetes RBAC is enforced per request and no kubeconfig is ever handed out.
+- **Story 3 — CI / CLI / non-Go automation.** A CI pipeline (Python / TypeScript / bash +
+  `curl`) creates a deployment and polls its status over REST. In pull requests it calls
+  `dryRun=client` to render and review the resulting manifest **without a cluster**.
+- **Story 4 — Observe and scale.** An ops dashboard reads a deployment's status (phase,
+  conditions, replica counts) and triggers a `scale` action on a worker component — all through
+  Dynadmin, without direct cluster access.
+
+### Scope
+
+**In scope (v1):**
+
+- CRUD + status read for DGD and DGDR; CRUD for DM (model / LoRA registry); read-only for DCD;
+  read-only + a `scale` action for scaling adapters.
+- The high-level `deploy` translation (flat config → DGD or DGDR) with a two-level dry-run.
+- Status, events, a `scale` action, and YAML/manifest export; a served OpenAPI 3.x document.
+- AuthN/AuthZ mapped onto Kubernetes RBAC (user impersonation), with namespace/tenant scoping.
+
+**Deferred / out of scope:**
+
+- The advanced CR surface (`epp`, raw planner config, `topologyConstraint`, checkpoints,
+  GMS/failover) — reachable via raw CRUD as an escape hatch, not modeled in the high-level form
+  for v1.
+- Streaming status (Server-Sent Events) and the aggregated-apiserver topology — Phase 2.
+- Everything under Non-goals (kube-API replacement, the data plane, billing/identity).
+
+## Design Details
 
 ### Architecture
 
@@ -121,11 +154,10 @@ authoritative place that tracks the CRD, not copied into every consumer.
 and scales horizontally. It is the single place where the intent → CR translation lives. The
 operator's reconcile loop is unchanged and remains the source of truth.
 
-### What the API exposes
+### API surface
 
-The API fronts the existing CRDs with namespace-scoped REST resources
-(`/api/v1/namespaces/{ns}/…`), targeting each CRD's **served** version (the conversion webhook
-bridges to the storage version):
+Dynadmin fronts the CRDs with namespace-scoped REST resources (`/api/v1/namespaces/{ns}/…`),
+targeting each CRD's **served** version (the conversion webhook bridges to the storage version):
 
 | Resource             | CRD (kind)                              | Served apiVersion         | Verbs        |
 | -------------------- | --------------------------------------- | ------------------------- | ------------ |
@@ -135,14 +167,40 @@ bridges to the storage version):
 | Components           | `DynamoComponentDeployment`             | `nvidia.com/v1beta1`      | read-only    |
 | Scaling Adapters     | `DynamoGraphDeploymentScalingAdapter`   | `nvidia.com/v1beta1`      | read-only (scale via the deployments `scale` action) |
 
-On top of plain CRUD, the API offers a **high-level `deploy` endpoint**: it accepts a flat,
-UI-friendly configuration and emits a complete **DGD** (direct) or **DGDR** (SLA / auto-optimized)
-— the single, canonical home for the intent → CR translation consumers re-implement today. It
-supports a two-level dry-run — **render-only** (translate and return the manifest, no cluster
-contact) and **server-side** (a Kubernetes `dryRun=All` for real admission/CEL validation).
-Status, events, a streaming watch (SSE), a `scale` action, and YAML export are exposed as
-subresources. The full route list, request schema, dry-run mechanics, and error model will be specified in
-the served OpenAPI document and a follow-up design doc.
+Each resource gets the usual collection/item routes plus a few subresources:
+
+```
+GET  | POST                 /api/v1/namespaces/{ns}/deployments
+GET  | PUT | PATCH | DELETE  /api/v1/namespaces/{ns}/deployments/{name}
+GET                          /api/v1/namespaces/{ns}/deployments/{name}/{status | events | manifest}
+POST                         /api/v1/namespaces/{ns}/deployments/{name}/scale
+POST                         /api/v1/namespaces/{ns}/deploy            # high-level translate + create
+```
+
+The headline is the high-level **`deploy`** endpoint: it accepts a flat, UI-friendly
+configuration and emits a complete **DGD** (direct) or **DGDR** (SLA / auto-optimized) — the
+single, canonical home for the intent → CR translation consumers re-implement today. It supports
+a two-level dry-run: **`dryRun=client`** (render-only — translate and return the manifest, no
+cluster contact, so it works with no cluster at all) and **`dryRun=server`** (a Kubernetes
+`dryRun=All` apply for real admission/CEL validation without persisting; this relies on the
+operator's admission webhooks being dry-run-safe, which they are today).
+
+A few design points fall out of this:
+
+- **One translation, tested.** The intent → CR translation lives only in Dynadmin and is
+  unit-tested against the served CRD schema, so it cannot drift the way per-platform copies do.
+- **Validation up front.** Enum fields (GPU SKU, backend, search strategy, component type) are
+  checked against the CRD's own enums and returned as structured per-field errors (RFC 7807
+  style) before anything reaches the cluster.
+- **Scale safely.** The `scale` action drives a component's scaling adapter when present; if a
+  planner owns the replicas and there is no adapter, it refuses (`409`) rather than issuing a
+  `replicas` patch the planner would immediately revert.
+- **Disaggregation correctness.** When the form requests prefill/decode separation, the
+  translation emits a working disaggregated graph for the target engine — including the engine's
+  prefill/decode launch flag and the mandatory KV-transfer connector config — tracking the
+  engine's current convention (see Appendix A).
+- **OpenAPI.** Full request/response schemas, the complete route list, and the error model are
+  published in the served OpenAPI 3.x document and the follow-up design doc.
 
 ### Authentication & authorization
 
@@ -191,58 +249,6 @@ table** are in Appendix A. (Proposed design; not implemented in this DEP.)
 CRD schema (see Appendix A): a `GPUSKUType`-driven GPU dropdown, the NVIDIA accent, and the
 v1beta1 `components` mapping.*
 
-## Alternate Solutions
-
-- **Status quo (client-go / kubectl / Helm).** Works for Go and ops users; fails the non-Go,
-  web-UI, and multi-tenant SaaS cases and forces translation duplication.
-- **Generic Kubernetes dashboards** (Headlamp, Lens, k8s-dashboard). Show raw CRs but have no
-  Dynamo domain model, no "deploy a model" intent layer, and no SLA/profiling workflow.
-- **Per-platform bridges.** Each platform re-implements a client-side translator plus a kube
-  client. Proven but duplicated per platform and prone to schema drift — exactly the cost this
-  DEP removes.
-- **GAIE / Inference Gateway.** Solves the *data* plane (OpenAI-compatible inference), not CRD
-  lifecycle management.
-
-## Requirements
-
-Using RFC 2119 keywords:
-
-1. The API **MUST** expose create/read/update/delete and status read for
-   `DynamoGraphDeployment` and `DynamoGraphDeploymentRequest`, CRUD for `DynamoModel`, and
-   read-only access for `DynamoComponentDeployment`.
-2. The API **MUST** target the correct served CRD apiVersion per resource:
-   `nvidia.com/v1beta1` for DGD/DGDR/DCD and `nvidia.com/v1alpha1` for `DynamoModel`.
-3. The API **MUST** provide a high-level `deploy` endpoint producing a valid DGD or DGDR from a
-   flat configuration, and **MUST** support a render-only `dryRun=client` that returns the
-   rendered manifest (JSON and YAML) **without contacting the cluster**.
-4. The API **SHOULD** offer a `dryRun=server` level that issues a Kubernetes `dryRun=All` apply
-   for real admission/CEL validation without persistence. This **depends on** the operator's
-   admission webhooks being dry-run-safe (`sideEffects: None` / `NoneOnDryRun`) — a constraint
-   the operator satisfies today.
-5. The intent → CR translation logic **MUST** live in exactly one place (the server) and
-   **MUST** be unit-tested against the served CRD schema version.
-6. The disaggregation toggle **MUST** emit a working disaggregated graph for the target engine
-   against the served v1beta1 `components` schema — including the engine's prefill/decode launch
-   flag (e.g. `--disaggregation-mode`) **and** the mandatory KV-transfer connector config
-   (`--kv-transfer-config`) — and **MUST** track the engine's current convention rather than a
-   hard-coded legacy form.
-7. The API **MUST** authorize every mutation through Kubernetes RBAC via user impersonation or
-   token forwarding and **MUST NOT** require distributing kubeconfigs to clients.
-8. The API **MUST** validate enum fields (GPU SKU, backend, searchStrategy, component type)
-   against the CRD `+kubebuilder:validation` enums and return RFC-7807 errors with per-field
-   detail.
-9. The API **MUST** be described by a served OpenAPI 3.x document.
-10. The API **SHOULD** stream status transitions via Server-Sent Events (Phase 2).
-11. The `scale` subresource **SHOULD** drive the component's `DynamoGraphDeploymentScalingAdapter`
-    scale subresource when present; when no adapter exists and a planner owns the replicas it
-    **SHOULD** refuse (`409`) rather than issue a `replicas` patch the planner would revert.
-12. Writes **SHOULD** use Server-Side Apply with a **per-caller** field manager so per-tenant
-    ownership/conflict detection stays correct and coexists with planner/HPA/GitOps owners.
-13. The reference gateway **SHOULD** be stateless and horizontally scalable, and **SHOULD** run
-    cluster-free in a render-only/dry-run mode for local development and CI.
-14. The API **MUST NOT** accept or persist raw secret material (e.g. HuggingFace tokens) in
-    deployment-config bodies; secrets **MUST** be referenced by name.
-
 ## Risks / Open Questions
 
 1. **Schema drift (the very problem this solves).** A hand-written translation can itself drift
@@ -259,9 +265,9 @@ Using RFC 2119 keywords:
    right trade-off?
 5. **Impersonation privilege.** A gateway SA with broad `impersonate` is a high-value target;
    reviewers will want `resourceName` scoping, NetworkPolicy, and audit review.
-6. **Scale semantics (resolved in Requirement 11).** When no DGDSA exists and a planner owns the component,
-   the API refuses (`409`) rather than racing; open follow-up is how to detect "a planner owns
-   this component" reliably.
+6. **Scale semantics (resolved in Design Details).** When no scaling adapter exists and a planner
+   owns the component, the `scale` action refuses (`409`) rather than racing; the open follow-up
+   is how to detect "a planner owns this component" reliably.
 7. **Lossy coverage.** The form covers frontend/worker/prefill/decode but not `epp`, raw planner
    config (`spec.features.planner`), `topologyConstraint`, `compilationCache`, or GMS/failover.
    Is a lossy subset acceptable, with an escape hatch to raw CRUD for advanced cases?
@@ -272,6 +278,18 @@ Using RFC 2119 keywords:
 10. **Ownership.** Where does the reference service live (operator module vs separate module),
     who owns its release cadence, and does it import the operator's Go types or stay on
     `unstructured` to avoid a compile-time coupling?
+
+## Alternate Solutions
+
+- **Status quo (client-go / kubectl / Helm).** Works for Go and ops users; fails the non-Go,
+  web-UI, and multi-tenant SaaS cases and forces translation duplication.
+- **Generic Kubernetes dashboards** (Headlamp, Lens, k8s-dashboard). Show raw CRs but have no
+  Dynamo domain model, no "deploy a model" intent layer, and no SLA/profiling workflow.
+- **Per-platform bridges.** Each platform re-implements a client-side translator plus a kube
+  client. Proven but duplicated per platform and prone to schema drift — exactly the cost this
+  DEP removes.
+- **GAIE / Inference Gateway.** Solves the *data* plane (OpenAI-compatible inference), not CRD
+  lifecycle management.
 
 ## References
 

@@ -21,7 +21,7 @@ Dynamo's Kubernetes operator exposes its deployment surface — `DynamoGraphDepl
 client-go, Helm). There is no language-agnostic, OpenAPI-documented, auth-friendly HTTP
 surface for *creating, reading, updating, deleting, and observing* these resources.
 
-This DEP proposes **Governor** — the Dynamo control-plane API: a thin, stateless HTTP service that fronts the
+This DEP proposes **Dynadmin** — the Dynamo control-plane API: a thin, stateless HTTP service that fronts the
 existing CRDs with a versioned, OpenAPI-described contract, plus a **high-level `deploy`
 endpoint** that translates a simplified, UI-friendly configuration into a fully-formed DGD or
 DGDR custom resource. A reference **"Deploy a model" UI** in the NVIDIA visual style
@@ -105,7 +105,7 @@ authoritative place that tracks the CRD, not copied into every consumer.
 ```
             ┌────────────────────────┐        HTTPS / JSON (OpenAPI 3.x)
    Web UI ──┤                        │◄───────────────────────────── CLI / CI / SaaS
-            │        Governor        │
+            │        Dynadmin        │
   (React)   │   (stateless facade)   │  AuthN: bearer/OIDC   AuthZ: K8s RBAC (impersonation)
             └───────────┬────────────┘
                         │ kube-apiserver REST (served versions, Server-Side Apply)
@@ -117,7 +117,7 @@ authoritative place that tracks the CRD, not copied into every consumer.
                 └───────────────┘
 ```
 
-**Governor** is **stateless**: it holds no database, derives all state from the Kubernetes API,
+**Dynadmin** is **stateless**: it holds no database, derives all state from the Kubernetes API,
 and scales horizontally. It is the single place where the intent → CR translation lives. The
 operator's reconcile loop is unchanged and remains the source of truth.
 
@@ -185,7 +185,7 @@ parallelism / scaling / SLA / disaggregation / advanced sections, and a live YAM
 design tokens, page wireframe, field-visibility-by-mode, and the full **form-field → CR mapping
 table** are in Appendix A. (Proposed design; not implemented in this DEP.)
 
-![Reference "Deploy a model" form (illustrative prototype)](images/governor-deploy-form.png)
+![Reference "Deploy a model" form (illustrative prototype)](images/dynadmin-deploy-form.png)
 
 *Illustrative prototype of the "Deploy a model" form. The proposed design tracks the canonical
 CRD schema (see Appendix A): a `GPUSKUType`-driven GPU dropdown, the NVIDIA accent, and the
